@@ -53,7 +53,7 @@ You're done when you see `Init complete.` Run `5. status` to check the connectio
 
 ## SteamOS
 
-Supported: **Windows games added to Steam as non-Steam games and run with Proton**. In Desktop Mode, open Konsole and run:
+Supported: **Windows games run with Proton**, either Steam games or games added to Steam as non-Steam games. Native Linux games are not supported. In Desktop Mode, open Konsole and run:
 
 ```
 curl -OL https://raw.githubusercontent.com/chillibeaver/Savething/refs/heads/main/savething.py
@@ -62,7 +62,8 @@ python3 savething.py
 
 - **Install** Ludusavi and SyncThingy (Syncthing) from Discover. Both are found automatically.
 - **Start the game once** before `accept`, so Proton creates its prefix.
-- **Shortcut names don't matter.** Savething finds which shortcut runs the game; if it can't tell, it asks once and remembers.
+- **Steam games** use their own Proton prefix automatically.
+- **Shortcut names don't matter.** For non-Steam games, Savething finds which shortcut runs the game; if it can't tell, it asks once and remembers.
 - Only saves on `C:` can be mapped. Saves on other drives are skipped.
 
 ---
@@ -82,7 +83,7 @@ Double-click `savething.exe` to open the menu, or run the commands directly:
 
 **`share` options**
 
-- `--all`: also show excluded games (e.g. Steam games).
+- `--all`: also show excluded games (e.g. games with no save files). In the menu, type `showall` at the game prompt instead.
 - `--devices <name>`: choose target devices without being asked.
 - `--yes`: skip confirmations. Settings files are not synced unless you add `--include-config`.
 - `--include-config` / `--exclude-config`: sync or skip settings files without being asked.
@@ -109,7 +110,7 @@ SteamOS:    .../compatdata/<appid>/pfx/drive_c/users/steamuser/Saved Games/Hades
 
 ## Good to know
 
-- **Excluded games:** Steam games, and games that only save to the Windows registry.
+- **Excluded games:** games that only save to the Windows registry, and games whose saves are only inside Steam or install folders (e.g. Steam Cloud's `userdata`; those are left to Steam Cloud). Steam games are treated like any other game.
 - **`[ignored in Ludusavi]`** means the game is unchecked in Ludusavi's Backup tab. It's only a note: the game can still be shared and synced normally.
 - **Settings files:** graphics and control settings are not synced by default, so each device can keep its own. You're asked for each game during `share`.
 - **Games with saves in several places** get one synced folder per location.

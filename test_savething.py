@@ -8,7 +8,6 @@ import savething as g
 DATA = Path(__file__).parent / "testdata"
 HOME = "C:/Users/player"
 STEAM = ["E:/steam"]
-INSTALLED = {570, 578080}  # Dota 2, PUBG
 SKIP = STEAM + ["C:/Program Files/WindowsApps"]
 
 
@@ -101,19 +100,21 @@ class Steam(unittest.TestCase):
     def setUpClass(cls):
         cls.preview, cls.manifest = load()
 
-    def reason(self, name):
-        return g.steam_reason(list(self.preview[name]["files"]), self.manifest.get(name, {}), STEAM, INSTALLED)
+    def skipped(self, name):
+        return g.all_skipped(list(self.preview[name]["files"]), SKIP)
 
-    def test_installed(self):
-        self.assertEqual(self.reason("Dota 2"), "installed in Steam")
-        self.assertEqual(self.reason("PUBG: Battlegrounds"), "installed in Steam")
+    def test_steam_games_are_not_excluded(self):
+        self.assertFalse(self.skipped("PUBG: Battlegrounds"))  # installed in Steam, saves in AppData
+        self.assertFalse(self.skipped("Astlibra Revision"))  # Steam userdata plus AppData
+        self.assertFalse(self.skipped("Hades II"))
 
-    def test_userdata(self):
-        self.assertEqual(self.reason("Astlibra Revision"), "saves in Steam dir")
+    def test_saves_only_in_steam_dir(self):
+        self.assertTrue(self.skipped("Dota 2"))  # only Steam userdata
 
-    def test_non_steam(self):
-        self.assertIsNone(self.reason("Hades II"))
-        self.assertIsNone(self.reason("Forza Horizon 6"))
+    def test_prefix_in_steam_library_is_not_skipped(self):
+        env = g.prefix_env(f"{LIB}/steamapps/compatdata/570/pfx")
+        self.assertEqual(g.row_skip_dirs(env, [LIB, "/x"]), ["/x"])
+        self.assertEqual(g.row_skip_dirs(None, [LIB]), [LIB])
 
     def test_library_parsing(self):
         with tempfile.TemporaryDirectory() as d:
@@ -310,7 +311,8 @@ class Proton(unittest.TestCase):
         sc = {SC_ID: g.Shortcut("Game")}
         env, files, reason = g.pick_proton_files([PHOME + "/AppData/Local/G/a", PFX + "/user.reg"], [LIB], sc)
         self.assertEqual((env, files, reason), (self.env, [PHOME + "/AppData/Local/G/a"], None))
-        self.assertEqual(g.pick_proton_files([other], [LIB], sc)[2], "Steam game (Proton)")
+        steam_pfx = f"{LIB}/steamapps/compatdata/570/pfx"
+        self.assertEqual(g.pick_proton_files([other], [LIB], sc), (g.prefix_env(steam_pfx), [other], None))
         self.assertEqual(g.pick_proton_files([PFX + "/user.reg"], [LIB], sc)[2], "registry-only saves, cannot sync")
         self.assertIn("not in a Proton prefix", g.pick_proton_files(["/home/deck/.local/share/G/a"], [LIB], sc)[2])
 
@@ -335,6 +337,25 @@ class Proton(unittest.TestCase):
             self.assertEqual(g.match_shortcut(cel, sc, [d], lambda: ["stuff"]), 3)  # manifest installDir
             (Path(d) / "steamapps/compatdata/3/pfx/drive_c/users/steamuser/appdata/local/celeste").mkdir(parents=True)
             self.assertEqual(g.match_shortcut(cel, sc, [d]), 3)  # save dir already there
+
+    def test_choose_prefix_steam_game(self):
+        import contextlib
+        import io
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as d, contextlib.redirect_stdout(io.StringIO()):
+            (Path(d) / "steamapps/compatdata/570/pfx/drive_c/users/steamuser").mkdir(parents=True)
+            (Path(d) / "steamapps/appmanifest_570.acf").write_text("x")
+            ctx = SimpleNamespace(cfg={}, cfg_dir=Path(d))
+            e = {"game": "Dota 2", "portable_path": "<home>/x", "steam_ids": [570]}
+            env = g.choose_prefix(ctx, e, {}, [d], True)
+            self.assertEqual(env, g.prefix_env(g.norm(d) + "/steamapps/compatdata/570/pfx"))
+            self.assertEqual(ctx.cfg["prefix_map"], {"Dota 2": 570})
+            # old registry entry without steam_ids: ids come from the manifest
+            ctx.cfg = {}
+            del e["steam_ids"]
+            self.assertIsNotNone(g.choose_prefix(ctx, e, {}, [d], True, steam_ids=lambda: {570}))
+            ctx.cfg = {}
+            self.assertIsNone(g.choose_prefix(ctx, e, {}, [d], True))  # not in Steam, no shortcuts
 
     @unittest.skipIf(g.IS_WINDOWS, "Linux paths")
     def test_resolve_ci(self):
@@ -381,6 +402,15 @@ class Menu(unittest.TestCase):
     def test_menu_exit_on_eof(self):
         code, out, _ = self.run_menu([EOFError()])
         self.assertEqual(code, 0)
+
+    def test_selection_commands(self):
+        import contextlib
+        import io
+        from unittest import mock
+        with mock.patch("builtins.input", side_effect=["ShowAll", "showall", "9", "2"]), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(g.ask_selection("> ", 3, commands=("showall",)), "showall")
+            self.assertEqual(g.ask_selection("> ", 3), [1])  # not a command here: invalid, then 9 out of range
 
 
 if __name__ == "__main__":

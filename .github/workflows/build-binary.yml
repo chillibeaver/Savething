@@ -1,11 +1,7 @@
 name: Build binary
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - savething.py
-  workflow_dispatch:
+  workflow_dispatch: # manual only: Actions -> Build binary -> Run workflow
 
 permissions:
   contents: write

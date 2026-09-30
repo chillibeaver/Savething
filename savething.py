@@ -537,24 +537,17 @@ def find_prefix(appid, libs) -> str | None:
 
 
 def pick_proton_files(paths, libs, shortcuts):
-    """Keep a game's files from one non-Steam shortcut's Proton prefix.
+    """Keep a game's files from one Proton prefix (a Steam game's or a non-Steam shortcut's).
 
     Returns (env, files, reason): reason is set when nothing can be synced. Files outside
     drive_c (e.g. the prefix's *.reg registry files) are never synced.
     """
     groups = {}
-    steam_hit = False
     for f in paths:
         hit = proton_prefix_of(f, libs)
-        if not hit:
-            continue
-        if hit[0] not in shortcuts:
-            steam_hit = True
-            continue
-        groups.setdefault(hit, []).append(f)
+        if hit:
+            groups.setdefault(hit, []).append(f)
     if not groups:
-        if steam_hit:
-            return None, [], "Steam game (Proton)"
         if any(re.search(r"/compatdata/\d+/pfx/", norm(f)) for f in paths):
             return None, [], "registry-only saves, cannot sync"
         return None, [], "not in a Proton prefix (native Linux?)"
@@ -562,19 +555,14 @@ def pick_proton_files(paths, libs, shortcuts):
     def newest(fs):
         return max((os.path.getmtime(f) for f in fs if os.path.exists(f)), default=0)
 
+    def name(a):
+        return shortcuts[a].name if a in shortcuts else f"Steam app {a}"
+
     (appid, pfx), files = max(groups.items(), key=lambda kv: newest(kv[1]))
     if len(groups) > 1:
-        others = ", ".join(shortcuts[a].name for a, _ in groups if a != appid)
-        print(f"  note: saves found in several prefixes; using the newest ({shortcuts[appid].name}), not {others}")
+        others = ", ".join(name(a) for a, _ in groups if a != appid)
+        print(f"  note: saves found in several prefixes; using the newest ({name(appid)}), not {others}")
     return prefix_env(pfx), files, None
-
-
-def steam_reason(files, manifest_entry, libs, installed) -> str | None:
-    if steam_ids_of(manifest_entry) & installed:
-        return "installed in Steam"
-    if any(is_under(f, lib) for f in files for lib in libs):
-        return "saves in Steam dir"
-    return None
 
 
 # ---------------------------------------------------------------- Syncthing API
@@ -823,9 +811,12 @@ def ask(prompt) -> str:
         return ""
 
 
-def ask_selection(prompt, n, empty_means_all=False) -> list[int]:
+def ask_selection(prompt, n, empty_means_all=False, commands=()) -> list[int] | str:
+    """Indexes picked by the user, or the entered word if it is one of commands."""
     while True:
         text = ask(prompt)
+        if text.lower() in commands:
+            return text.lower()
         if text.lower() in ("q", "quit", "0"):
             return []
         if not text:
@@ -1027,7 +1018,7 @@ def allocate_id(ctx, game, taken) -> str:
     return fid
 
 
-def create_share(ctx, reg_dir, game, root, fid, targets, ignores=(), env=None):
+def create_share(ctx, reg_dir, game, root, fid, targets, ignores=(), env=None, steam_ids=()):
     label = LABEL_PREFIX + game
     ignores = list(ignores)
     server_known = {d["deviceID"] for d in ctx.server.devices()}
@@ -1060,6 +1051,8 @@ def create_share(ctx, reg_dir, game, root, fid, targets, ignores=(), env=None):
         "created_by_name": ctx.dev_name(ctx.my_id),
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
+    if steam_ids:  # lets SteamOS find the Steam game's own Proton prefix on accept
+        entry["steam_ids"] = sorted(steam_ids)
     try:
         write_entry(reg_dir, entry)
     except OSError as e:
@@ -1135,7 +1128,6 @@ def scan_games(ctx, registry, local_ids):
     print("Scanning saves with Ludusavi, this can take a minute or two...", flush=True)
     lconf = ludusavi_json(ctx, "config", "show", "--api")
     libs = steam_libraries()
-    installed = installed_steam_ids(libs)
     skip_dirs = libs + [norm(r["path"]) for r in lconf.get("roots", []) if r.get("path")]
     shortcuts = {} if IS_WINDOWS else steam_shortcuts()
     prefixes = [p for p in (find_prefix(a, libs) for a in shortcuts) if p]
@@ -1155,16 +1147,13 @@ def scan_games(ctx, registry, local_ids):
     for name, g in sorted(preview.get("games", {}).items(), key=lambda kv: kv[0].casefold()):
         files = g.get("files") or {}
         paths = list(files)
-        entry = manifest.get(name) or {}
-        env = None
+        env, reason = None, None
         if not paths:
             reason = "registry-only saves, cannot sync" if g.get("registry") else "no save files"
-        elif IS_WINDOWS:
-            reason = steam_reason(paths, entry, libs, installed)
-        else:  # only Windows games run through Proton as non-Steam shortcuts are supported
+        elif not IS_WINDOWS:  # only Windows games run through Proton are supported
             env, paths, reason = pick_proton_files(paths, libs, shortcuts)
-            if reason is None and steam_ids_of(entry) & installed:
-                reason = "installed in Steam"
+        if reason is None and all_skipped(paths, row_skip_dirs(env, skip_dirs)):
+            reason = "saves only in Steam/install dirs"
         rows.append(GameRow(name, paths, sum(v.get("bytes", 0) for v in files.values()), reason,
                             g.get("decision") == "Ignored", by_game.get(name, []), bool(paths), env))
     return rows, manifest, skip_dirs
@@ -1174,12 +1163,23 @@ def tilde(path, home) -> str:
     return to_portable(path, home).replace("<home>", "~", 1)
 
 
+def row_skip_dirs(env, skip_dirs) -> list[str]:
+    """skip_dirs for a game's files; a Proton prefix sits inside a Steam library, so it isn't skipped."""
+    if env and env.drive_c:
+        return [d for d in skip_dirs if not is_under(env.drive_c, d)]
+    return skip_dirs
+
+
+def all_skipped(files, skip_dirs) -> bool:
+    """True if every file sits under a Steam/install dir, so nothing of the game can be synced."""
+    return all(any(is_under(f, d) for d in skip_dirs) for f in files)
+
+
 def plan_game(ctx, row, manifest, skip_dirs, include_config):
     """Returns (roots, ignores_by_root, skipped, problems, settings_files) for one game."""
     entry = manifest.get(row.name) or {}
     env = row.env or ctx.home
-    if row.env and row.env.drive_c:  # the prefix sits inside a Steam library; don't skip it
-        skip_dirs = [d for d in skip_dirs if not is_under(row.env.drive_c, d)]
+    skip_dirs = row_skip_dirs(row.env, skip_dirs)
     saves, configs = classify_files(row.files, entry, env)
     configs = [c for c in configs if not any(is_under(c, d) for d in skip_dirs)]
     roots, skipped, problems = compute_roots(row.files if include_config else saves,
@@ -1203,6 +1203,31 @@ def ask_include_config(args, configs, home) -> bool:
     return confirm("  Also sync these settings files?", default=False)
 
 
+def list_games(rows, show_all, how_to_show):
+    """Print the numbered game list. Returns (visible rows, number of hidden rows)."""
+    visible = [r for r in rows if show_all or (r.reason is None and r.selectable)]
+    hidden = len(rows) - len(visible)
+    print()
+    if not rows:
+        print("No games with saves found.")
+    elif not visible:
+        print("No games to share.")
+    for i, r in enumerate(visible, 1):
+        marks = []
+        if r.shared:
+            marks.append("shared")
+        if r.ignored:
+            marks.append("ignored in Ludusavi")
+        if r.reason:
+            marks.append("excluded: " + r.reason)
+        mark = f"  [{' | '.join(marks)}]" if marks else ""
+        print(f"{i:3}. {r.name}  ({human(r.size)}){mark}")
+    if hidden:
+        print(f"\n{hidden} more games excluded (no save files, saves only in Steam/install dirs, etc.); "
+              f"{how_to_show} to see them.")
+    return visible, hidden
+
+
 def cmd_share(args):
     ctx = make_ctx(args)
     reg_dir = ctx.registry_dir()
@@ -1224,24 +1249,9 @@ def cmd_share(args):
         return
 
     rows, manifest, skip_dirs = scan_games(ctx, registry, local_ids)
-    visible = [r for r in rows if args.all or (r.reason is None and r.selectable)]
-    if not visible:
-        print("No games to share (use --all to see excluded games).")
+    visible, hidden = list_games(rows, args.all, "use --all" if args.dry_run else "type showall")
+    if not rows or (args.dry_run and not visible):
         return
-    print()
-    for i, r in enumerate(visible, 1):
-        marks = []
-        if r.shared:
-            marks.append("shared")
-        if r.ignored:
-            marks.append("ignored in Ludusavi")
-        if r.reason:
-            marks.append("excluded: " + r.reason)
-        mark = f"  [{' | '.join(marks)}]" if marks else ""
-        print(f"{i:3}. {r.name}  ({human(r.size)}){mark}")
-    hidden = len(rows) - len(visible)
-    if hidden:
-        print(f"\n{hidden} more games excluded (Steam games or no save files); use --all to see them.")
 
     if args.dry_run:
         print("\n-- Directories that would be synced (--dry-run, nothing is created) --")
@@ -1266,7 +1276,13 @@ def cmd_share(args):
                 print(f"    ! {len(problems)} files sit directly in a broad dir and cannot be synced")
         return
 
-    idx = ask_selection("\nGames to share (e.g. 1,3,5-7; Enter to cancel): ", len(visible))
+    while True:
+        extra = "showall = list all games; " if hidden else ""
+        idx = ask_selection(f"\nGames to share (e.g. 1,3,5-7; {extra}Enter to cancel): ", len(visible),
+                            commands=("showall",) if hidden else ())
+        if idx != "showall":
+            break
+        visible, hidden = list_games(rows, True, "")
     chosen = [visible[i] for i in idx if visible[i].selectable]
     if not chosen:
         print("Cancelled.")
@@ -1307,7 +1323,7 @@ def cmd_share(args):
             continue
         for root in ok_roots:
             create_share(ctx, reg_dir, r.name, root, allocate_id(ctx, r.name, taken), targets, ignores[root],
-                         r.env)
+                         r.env, steam_ids_of(manifest.get(r.name) or {}))
             local_folders.append({"id": "?", "path": root})
     print("\nDone. Run `savething accept` on the other devices to receive.")
 
@@ -1358,18 +1374,23 @@ def match_shortcut(entry, shortcuts, libs, install_dirs=list) -> int | None:
     return hit
 
 
-def choose_prefix(ctx, entry, shortcuts, libs, yes, install_dirs=list) -> Env | None:
-    """Env of the Proton prefix of the non-Steam shortcut that runs this game. The choice
-    is remembered in config.json ("prefix_map")."""
+def choose_prefix(ctx, entry, shortcuts, libs, yes, install_dirs=list, steam_ids=set) -> Env | None:
+    """Env of the Proton prefix that runs this game: the Steam game's own prefix if it is
+    installed in Steam, else a non-Steam shortcut's. The choice is remembered in config.json
+    ("prefix_map"). steam_ids is a callable, like install_dirs, so the manifest is only read if needed."""
     game = entry["game"]
     pmap = ctx.cfg.setdefault("prefix_map", {})
     appid = pmap.get(game)
     if appid is None:
-        appid = match_shortcut(entry, shortcuts, libs, install_dirs)
-        if appid is not None:
+        in_steam = sorted(set(entry.get("steam_ids") or steam_ids()) & installed_steam_ids(libs))
+        if in_steam:
+            appid = in_steam[0]
+            print(f"  {game}: using Steam game prefix ({appid})")
+        elif (appid := match_shortcut(entry, shortcuts, libs, install_dirs)) is not None:
             print(f"  {game}: using Steam shortcut \"{shortcuts[appid].name}\"")
         elif not shortcuts:
-            print(f"  ! Skipping {game}: no non-Steam games in Steam; add the game to Steam first")
+            print(f"  ! Skipping {game}: not installed in Steam and no non-Steam games in Steam; "
+                  f"install it or add it to Steam first")
             return None
         elif yes:
             print(f"  ! Skipping {game}: no Steam shortcut named like it; run accept without --yes to pick one")
@@ -1434,14 +1455,14 @@ def cmd_accept(args):
     shortcuts = {} if IS_WINDOWS else steam_shortcuts()
     manifest = None
 
-    def install_dirs(ctx, game):  # Ludusavi is optional on receiving devices
+    def game_entry(ctx, game):  # Ludusavi is optional on receiving devices
         nonlocal manifest
         if manifest is None:
             try:
                 manifest = ludusavi_json(ctx, "manifest", "show", "--api")
             except (SavethingError, ValueError):
                 manifest = {}
-        return list((manifest.get(game) or {}).get("installDir") or {})
+        return manifest.get(game) or {}
 
     for i in idx:
         e = todo[i]
@@ -1450,7 +1471,9 @@ def cmd_accept(args):
         if IS_WINDOWS:
             path = from_portable(e["portable_path"], ctx.home)
         else:
-            env = choose_prefix(ctx, e, shortcuts, libs, args.yes, lambda: install_dirs(ctx, e["game"]))
+            env = choose_prefix(ctx, e, shortcuts, libs, args.yes,
+                                lambda: list(game_entry(ctx, e["game"]).get("installDir") or {}),
+                                lambda: steam_ids_of(game_entry(ctx, e["game"])))
             if env is None:
                 continue
             path = from_portable(e["portable_path"], env)
@@ -1638,7 +1661,8 @@ def main(argv=None):
     p.set_defaults(func=cmd_init)
 
     p = sub.add_parser("share", help="pick games and create shares")
-    p.add_argument("--all", action="store_true", help="also show excluded games (Steam, etc.)")
+    p.add_argument("--all", action="store_true",
+                   help="also show excluded games (no save files, etc.); in the menu, type showall instead")
     p.add_argument("--dry-run", action="store_true", help="only show the list and target dirs; create nothing")
     p.add_argument("--devices", help="target devices (names or ID prefixes, comma-separated); skips the prompt")
     p.add_argument("--yes", action="store_true", help="do not ask for confirmation (settings files are not synced)")

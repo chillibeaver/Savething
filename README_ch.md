@@ -64,7 +64,7 @@ savething.exe init --server-url http://<服务器IP>:8384 --server-key <API 密�
 
 **`share` 选项**
 
-- `--all`：也显示被排除的游戏（比如 Steam 游戏）。
+- `--all`：也显示被排除的游戏（比如没有存档文件的游戏）。在菜单里用 share 时，在选游戏的提示处输入 `showall` 即可。
 - `--devices <名字>`：直接指定目标设备，不再询问。
 - `--yes`：跳过确认。不加 `--include-config` 时不同步设置文件。
 - `--include-config` / `--exclude-config`：同步或不同步设置文件，不再询问。
@@ -91,7 +91,7 @@ SteamOS：    .../compatdata/<appid>/pfx/drive_c/users/steamuser/Saved Games/Had
 
 ## 须知
 
-- **被排除的游戏：** Steam 游戏，以及只把存档写在 Windows 注册表里的游戏。
+- **被排除的游戏：** 只把存档写在 Windows 注册表里的游戏，以及存档只在 Steam 或安装目录里的游戏（比如 Steam 云存档的 `userdata`，这部分交给 Steam 云）。Steam 游戏和其他游戏一视同仁。
 - **`[ignored in Ludusavi]`** 表示这个游戏在 Ludusavi 的备份页里没有勾选。它只是个提示，游戏照样可以共享和同步。
 - **设置文件：** 画面和按键设置默认不同步，便于每台设备保留自己的设置。`share` 时会逐个游戏询问。
 - **存档分散在几个地方的游戏**，每个位置建一个同步文件夹。
@@ -102,7 +102,7 @@ SteamOS：    .../compatdata/<appid>/pfx/drive_c/users/steamuser/Saved Games/Had
 
 ## SteamOS
 
-支持：**以非 Steam 游戏身份加进 Steam、用 Proton 运行的 Windows 游戏**。Steam 游戏交给 Steam 云存档，原生 Linux 游戏不支持。在桌面模式下打开 Konsole，运行：
+支持：**用 Proton 运行的 Windows 游戏**，Steam 游戏和以非 Steam 游戏身份加进 Steam 的游戏都行。原生 Linux 游戏不支持。在桌面模式下打开 Konsole，运行：
 
 ```
 curl -OL https://raw.githubusercontent.com/chillibeaver/Savething/refs/heads/main/savething.py
@@ -111,7 +111,8 @@ python3 savething.py
 
 - **安装：** 在 Discover 里装 Ludusavi 和 SyncThingy（Syncthing），都会被自动找到。
 - **`accept` 之前先启动一次游戏**，让 Proton 建好前缀。
-- **快捷方式叫什么都行。** Savething 会自己找到运行这个游戏的快捷方式；认不出来时问你一次，之后记住。
+- **Steam 游戏**自动使用它自己的 Proton 前缀。
+- **快捷方式叫什么都行。** 对非 Steam 游戏，Savething 会自己找到运行这个游戏的快捷方式；认不出来时问你一次，之后记住。
 - 只有 C 盘上的存档能对应过来，其他盘上的会跳过。
 
 ---
